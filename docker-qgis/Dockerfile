@@ -1,4 +1,4 @@
-FROM qgis/qgis:final-3_28_1
+FROM ghcr.io/m-kuhn/qgis-slim:latest
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
