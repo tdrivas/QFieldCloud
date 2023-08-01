@@ -73,6 +73,11 @@ urlpatterns = [
         name="public_files",
     ),
     path(
+        "files2/<uuid:projectid>/",
+        files_views.FilesListView.as_view(),
+        name="project_file_download2",
+    ),
+    path(
         "packages/<uuid:project_id>/latest/",
         package_views.LatestPackageView.as_view(),
     ),

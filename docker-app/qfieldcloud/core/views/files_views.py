@@ -1,13 +1,19 @@
-import copy
-import io
 import logging
 from pathlib import PurePath
-from traceback import print_stack
 
 import qfieldcloud.core.utils2 as utils2
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 from django.utils import timezone
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
+from qfieldcloud.core import (
+    exceptions,
+    pagination,
+    permissions_utils,
+    serializers,
+    utils,
+)
 from drf_spectacular.utils import (
     OpenApiParameter,
     OpenApiTypes,
@@ -24,7 +30,16 @@ from qfieldcloud.core.utils2.storage import (
     get_attachment_dir_prefix,
     purge_old_file_versions,
 )
-from rest_framework import permissions, serializers, status, views
+from qfieldcloud.core.models import (
+    File,
+    FileVersion,
+    Job,
+    ProcessProjectfileJob,
+    Project,
+)
+from qfieldcloud.core.utils import S3ObjectVersion
+from qfieldcloud.core.utils2.storage import get_attachment_dir_prefix
+from rest_framework import generics, permissions, status, views
 from rest_framework.exceptions import NotFound
 from rest_framework.parsers import DataAndFiles, MultiPartParser
 from rest_framework.request import Request
@@ -87,7 +102,7 @@ class ListFilesView(views.APIView):
 
             version_data = {
                 "size": version.size,
-                "md5sum": md5sum,
+                # "md5sum": md5sum,
                 "version_id": version.version_id,
                 "last_modified": last_modified,
                 "is_latest": version.is_latest,
@@ -106,21 +121,21 @@ class ListFilesView(views.APIView):
                 head = version.head()
                 # We cannot be sure of the metadata's first letter case
                 # https://github.com/boto/boto3/issues/1709
-                metadata = head["Metadata"]
-                if "sha256sum" in metadata:
-                    sha256sum = metadata["sha256sum"]
-                else:
-                    sha256sum = metadata["Sha256sum"]
-                files[version.key]["sha256"] = sha256sum
+                head["Metadata"]
+                # if "sha256sum" in metadata:
+                #     sha256sum = metadata["sha256sum"]
+                # else:
+                #     sha256sum = metadata["Sha256sum"]
+                # files[version.key]["sha256"] = sha256sum
 
-                version_data["sha256"] = sha256sum
+                # version_data["sha256"] = sha256sum
 
             if version.is_latest:
                 is_attachment = get_attachment_dir_prefix(project, filename) != ""
 
                 files[version.key]["name"] = filename
                 files[version.key]["size"] = version.size
-                files[version.key]["md5sum"] = md5sum
+                # files[version.key]["md5sum"] = md5sum
                 files[version.key]["last_modified"] = last_modified
                 files[version.key]["is_attachment"] = is_attachment
 
@@ -216,46 +231,7 @@ class DownloadPushDeleteFileView(views.APIView):
         if len(request.FILES.getlist("file")) > 1:
             raise exceptions.MultipleContentsError()
 
-        # QF-2540
-        # Getting traceback in case the traceback provided by Sentry is too short
-        # Add post-serialization keys for diff-ing with pre-serialization keys
-        if "file" not in request.data and not request.FILES.getlist("file"):
-            if "file" not in request.data:
-                logger.warning(
-                    'The key "file" was not found in `request.data`. Sending report to Sentry.'
-                )
-
-            if not request.FILES.getlist("file"):
-                logger.warning(
-                    'The key "file" occurs in `request.data` but maps to an empty list. Sending report to Sentry.'
-                )
-
-            callstack_buffer = io.StringIO()
-            print_stack(limit=50, file=callstack_buffer)
-
-            request_attributes = {
-                "data": str(copy.copy(self.request.data).keys()),
-                "files": str(self.request.FILES.keys()),
-                "meta": str(self.request.META),
-            }
-
-            # QF-2540
-            report_serialization_diff_to_sentry(
-                # using the 'X-Request-Id' added to the request by RequestIDMiddleware
-                name=f"{request.META.get('X-Request-Id')}_{projectid}",
-                pre_serialization=request.attached_keys,
-                post_serialization=",".join(QfcMultiPartSerializer.errors)
-                + str(request_attributes),
-                buffer=callstack_buffer,
-                body_stream=getattr(request, "body_stream", None),
-            )
-            raise exceptions.EmptyContentError()
-
-        # get project from request or db
-        if hasattr(request, "project"):
-            project = request.project
-        else:
-            project = Project.objects.get(id=projectid)
+        project = Project.objects.get(id=projectid)
         is_qgis_project_file = utils.is_qgis_project_file(filename)
 
         # check only one qgs/qgz file per project
@@ -268,26 +244,19 @@ class DownloadPushDeleteFileView(views.APIView):
                 "Only one QGIS project per project allowed"
             )
 
-        request_file = request.FILES.get("file")
-
+        uploaded_file = request.FILES.get("file")
         permissions_utils.check_can_upload_file(
-            project, request.auth.client_type, request_file.size
+            project, request.auth.client_type, uploaded_file.size
         )
 
-        old_object = get_project_file_with_versions(project.id, filename)
-        sha256sum = utils.get_sha256(request_file)
-        bucket = utils.get_s3_bucket()
-
-        key = utils.safe_join(f"projects/{projectid}/files/", filename)
-        metadata = {"Sha256sum": sha256sum}
-
-        bucket.upload_fileobj(request_file, key, ExtraArgs={"Metadata": metadata})
-
-        new_object = get_project_file_with_versions(project.id, filename)
-
-        assert new_object
-
         with transaction.atomic():
+            file_version = FileVersion.objects.add_version(
+                projectid,
+                filename,
+                uploaded_file,
+                request.user,
+            )
+
             # we only enter a transaction after the file is uploaded above because we do not
             # want to lock the project row for way too long. If we reselect for update the
             # project and update it now, it guarantees there will be no other file upload editing
@@ -319,38 +288,21 @@ class DownloadPushDeleteFileView(views.APIView):
 
             project.data_last_updated_at = timezone.now()
             # NOTE just incrementing the fils_storage_bytes when uploading might make the database out of sync if a files is uploaded/deleted bypassing this function
-            project.file_storage_bytes += request_file.size
+            project.file_storage_bytes += file_version.size
             project.save(update_fields=update_fields)
-
-        if old_object:
-            audit(
-                project,
-                LogEntry.Action.UPDATE,
-                changes={filename: [old_object.latest.e_tag, new_object.latest.e_tag]},
-            )
-        else:
-            audit(
-                project,
-                LogEntry.Action.CREATE,
-                changes={filename: [None, new_object.latest.e_tag]},
-            )
-
-        # Delete the old file versions
-        purge_old_file_versions(project)
 
         return Response(status=status.HTTP_201_CREATED)
 
     @transaction.atomic()
-    def delete(self, request, projectid, filename):
-        project = Project.objects.select_for_update().get(id=projectid)
-        version_id = request.META.get("HTTP_X_FILE_VERSION")
+    def delete(self, request, project_id, filename):
+        request.META.get("HTTP_X_FILE_VERSION")
 
-        if version_id:
-            utils2.storage.delete_project_file_version_permanently(
-                project, filename, version_id, False
-            )
-        else:
-            utils2.storage.delete_project_file_permanently(project, filename)
+        # TODO support version_id
+
+        File.objects.get(
+            project_id=project_id,
+            filename=filename,
+        ).delete()
 
         return Response(status=status.HTTP_200_OK)
 
@@ -399,3 +351,38 @@ class AdminDownloadPushDeleteFileView(DownloadPushDeleteFileView):
 @extend_schema(exclude=True)
 class AdminListFilesViews(ListFilesView):
     """Allowing `ListFilesView` to be excluded from the OpenAPI schema documentation"""
+
+
+class FilesListView(generics.ListAPIView):
+
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = serializers.FileSerializer
+    pagination_class = pagination.QfcLimitOffsetPagination()
+
+    def get_queryset(self):
+        return File.objects.all()
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        self.perform_destroy(instance)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    def perform_destroy(self, instance):
+        instance.delete()
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+        return Response(
+            serializer.data, status=status.HTTP_201_CREATED, headers=headers
+        )
+
+    def perform_create(self, serializer):
+        serializer.save()

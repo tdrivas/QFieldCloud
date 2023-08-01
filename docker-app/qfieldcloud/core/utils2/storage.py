@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -651,3 +652,24 @@ def get_project_file_storage_in_bytes(project_id: str) -> int:
         total_bytes += version.size or 0
 
     return total_bytes
+
+
+def calculate_checksums(
+    content: IO, alrgorithms: tuple[str, ...], blocksize: int = 65536
+) -> tuple[bytes, ...]:
+    """Calculates checksums on given file for given algorithms."""
+    hashers = []
+    for alrgorithm in alrgorithms:
+        hashers.append(getattr(hashlib, alrgorithm)())
+
+    for chunk in content.chunks(blocksize):
+        for hasher in hashers:
+            hasher.update(chunk)
+
+    content.seek(0)
+
+    checksums = []
+    for hasher in hashers:
+        checksums.append(hasher.digest())
+
+    return tuple(checksums)

@@ -6,6 +6,8 @@ from qfieldcloud.core import exceptions
 from qfieldcloud.core.models import (
     ApplyJob,
     Delta,
+    File,
+    FileVersion,
     Job,
     Organization,
     OrganizationMember,
@@ -477,28 +479,47 @@ class JobSerializer(serializers.ModelSerializer):
         allow_parallel_jobs = True
 
 
-class FileVersionSerializer(serializers.Serializer):
-    """NOTE not used for actual serialization, but for documentation suing Django Spectacular."""
+class FileVersionSerializer(serializers.ModelSerializer):
+    version_id = serializers.CharField(source="id")
+    last_modified = serializers.DateTimeField(source="created_at")
 
-    size = serializers.IntegerField()
-    md5sum = serializers.CharField()
-    version_id = serializers.CharField()
-    last_modified = serializers.DateTimeField()
-    is_latest = serializers.BooleanField(required=False)
-    display = serializers.CharField()
-    sha256 = serializers.CharField(required=False)
+    class Meta:
+        model = FileVersion
+        fields = (
+            "version_id",
+            "md5sum",
+            "sha256sum",
+            "size",
+            "last_modified",
+            "display",
+        )
 
 
-class FileSerializer(serializers.Serializer):
-    """NOTE not used for actual serialization, but for documentation suing Django Spectacular."""
+class FileSerializer(serializers.ModelSerializer):
+    size = serializers.SerializerMethodField()
+    last_modified = serializers.DateTimeField(source="created_at")
+    versions = FileVersionSerializer(many=True)
 
-    versions = serializers.ListField(child=FileVersionSerializer())
-    sha256 = serializers.CharField(required=False)
-    name = serializers.CharField()
-    size = serializers.IntegerField()
-    md5sum = serializers.CharField()
-    last_modified = serializers.DateTimeField()
-    is_attachment = serializers.BooleanField()
+    def get_size(self, obj):
+        return 0
+
+    class Meta:
+        model = File
+        fields = (
+            "name",
+            "size",
+            "last_modified",
+            "is_attachment",
+            "versions",
+        )
+        read_only_fields = (
+            "name",
+            "size",
+            "last_modified",
+            "is_attachment",
+            "versions",
+        )
+        order_by = "name"
 
 
 class LatestPackageSerializer(serializers.Serializer):

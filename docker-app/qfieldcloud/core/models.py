@@ -21,6 +21,7 @@ from django.db.models import When
 from django.db.models.aggregates import Count, Sum
 from django.db.models.fields.json import JSONField
 from django.urls import reverse_lazy
+from django.utils import timezone
 from django.utils.functional import cached_property
 from django.utils.translation import gettext as _
 from model_utils.managers import InheritanceManager, InheritanceManagerMixin
@@ -1778,3 +1779,101 @@ class Secret(models.Model):
                 fields=["project", "name"], name="secret_project_name_uniq"
             )
         ]
+
+
+class FileQueryset(models.QuerySet):
+    def whatever(self):
+        qs = self.annotate(
+            last_version_pk=(
+                FileVersion.objects.filter(file=OuterRef("pk"))
+                .order_by("-created_at")
+                .values("pk")[:1]
+            )
+        )
+        qs = qs.prefetch_related("versions")
+        return qs
+
+
+class File(models.Model):
+    objects = FileQueryset.as_manager()
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE)
+    name = models.CharField(max_length=1000, db_index=True)
+    is_deleted = models.BooleanField(default=False)
+    latest_version = models.ForeignKey(
+        "core.FileVersion", null=True, on_delete=models.SET_NULL, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(User, on_delete=models.CASCADE)
+
+    def is_attachment(self):
+        return storage.get_attachment_dir_prefix(self.project, self.name) != ""
+
+    def remove_version(self, version_id):
+        self.versions.get(version_id).delete
+
+
+class FileVersionQueryset(models.QuerySet):
+    @transaction.atomic()
+    def add_version(
+        self,
+        project_id: str,
+        filename: str,
+        content,
+        created_by: User,
+    ):
+        now = timezone.now()
+        try:
+            file = File.objects.get(project_id=project_id, name=filename)
+        except File.DoesNotExist:
+            file = File.objects.create(
+                project_id=project_id,
+                name=filename,
+                created_at=now,
+                created_by=created_by,
+            )
+
+        md5sum, sha256sum = storage.calculate_checksums(content, ("md5", "sha256"))
+        file_version = self.create(
+            file=file,
+            content=content,
+            md5sum=md5sum,
+            sha256sum=sha256sum,
+            size=content.size,
+            created_at=now,
+            created_by=created_by,
+        )
+
+        # TODO most probably we need to select_for_update the `file` object?
+        file.latest_version = file_version
+        file.save(update_fields=["latest_version"])
+
+        return file_version
+
+
+def upload_to(instance: "FileVersion", _filename: str) -> str:
+    return f"projects/{instance.file.project.id}/files/{instance.file.name}/{instance.display}"
+
+
+class FileVersion(models.Model):
+    objects = FileVersionQueryset.as_manager()
+    file = models.ForeignKey(File, on_delete=models.CASCADE, related_name="versions")
+
+    # projects/<project_id>/<filename>.<extension>/<timestamp_ms>
+    content = models.FileField(
+        upload_to=upload_to,
+        max_length=1000,
+    )
+    md5sum = models.BinaryField(max_length=16)
+    sha256sum = models.BinaryField(max_length=32)
+    size = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(User, on_delete=models.CASCADE)
+
+    @property
+    def display(self) -> str:
+        return self.created_at.strftime("v%Y%m%d%H%M%S")
+
+    def delete(self, *args, **kwargs):
+        self.content.delete()
+        super().delete(*args, **kwargs)
