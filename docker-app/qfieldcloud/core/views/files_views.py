@@ -5,31 +5,13 @@ import qfieldcloud.core.utils2 as utils2
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 from django.utils import timezone
-from drf_spectacular.types import OpenApiTypes
-from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
-from qfieldcloud.core import (
-    exceptions,
-    pagination,
-    permissions_utils,
-    serializers,
-    utils,
-)
 from drf_spectacular.utils import (
     OpenApiParameter,
     OpenApiTypes,
     extend_schema,
     extend_schema_view,
 )
-from qfieldcloud.core import exceptions, permissions_utils, utils
-from qfieldcloud.core.models import Job, ProcessProjectfileJob, Project
-from qfieldcloud.core.serializers import FileSerializer
-from qfieldcloud.core.utils import S3ObjectVersion, get_project_file_with_versions
-from qfieldcloud.core.utils2.audit import LogEntry, audit
-from qfieldcloud.core.utils2.sentry import report_serialization_diff_to_sentry
-from qfieldcloud.core.utils2.storage import (
-    get_attachment_dir_prefix,
-    purge_old_file_versions,
-)
+from qfieldcloud.core import exceptions, pagination, permissions_utils, utils
 from qfieldcloud.core.models import (
     File,
     FileVersion,
@@ -37,9 +19,10 @@ from qfieldcloud.core.models import (
     ProcessProjectfileJob,
     Project,
 )
+from qfieldcloud.core.serializers import FileSerializer
 from qfieldcloud.core.utils import S3ObjectVersion
 from qfieldcloud.core.utils2.storage import get_attachment_dir_prefix
-from rest_framework import generics, permissions, status, views
+from rest_framework import generics, permissions, serializers, status, views
 from rest_framework.exceptions import NotFound
 from rest_framework.parsers import DataAndFiles, MultiPartParser
 from rest_framework.request import Request
@@ -98,7 +81,7 @@ class ListFilesView(views.APIView):
             path = PurePath(version.key)
             filename = str(path.relative_to(*path.parts[:3]))
             last_modified = version.last_modified.strftime("%d.%m.%Y %H:%M:%S %Z")
-            md5sum = version.e_tag.replace('"', "")
+            # md5sum = version.e_tag.replace('"', "")
 
             version_data = {
                 "size": version.size,
@@ -354,9 +337,8 @@ class AdminListFilesViews(ListFilesView):
 
 
 class FilesListView(generics.ListAPIView):
-
     permission_classes = [permissions.IsAuthenticated]
-    serializer_class = serializers.FileSerializer
+    serializer_class = FileSerializer
     pagination_class = pagination.QfcLimitOffsetPagination()
 
     def get_queryset(self):

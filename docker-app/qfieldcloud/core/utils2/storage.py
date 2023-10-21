@@ -662,7 +662,7 @@ def calculate_checksums(
     for alrgorithm in alrgorithms:
         hashers.append(getattr(hashlib, alrgorithm)())
 
-    for chunk in content.chunks(blocksize):
+    for chunk in content.chunks(blocksize):  # type: ignore
         for hasher in hashers:
             hasher.update(chunk)
 
