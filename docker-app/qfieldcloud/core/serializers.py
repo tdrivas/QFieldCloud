@@ -13,6 +13,7 @@ from qfieldcloud.core.models import (
     Project,
     ProjectCollaborator,
     Team,
+    TeamMember,
     User,
 )
 from rest_framework import serializers
@@ -101,6 +102,18 @@ class ProjectSerializer(serializers.ModelSerializer):
             "user_role",
             "user_role_origin",
         )
+        read_only_fields = (
+            "private",
+            "created_at",
+            "updated_at",
+            "data_last_packaged_at",
+            "data_last_updated_at",
+            "can_repackage",
+            "needs_repackaging",
+            "status",
+            "user_role",
+            "user_role_origin",
+        )
         model = Project
 
 
@@ -159,6 +172,7 @@ class OrganizationSerializer(serializers.ModelSerializer):
     membership_is_public = serializers.BooleanField(
         read_only=True, source="membership_role_is_public"
     )
+    teams = serializers.SerializerMethodField()
 
     def get_members(self, obj):
         return [
@@ -167,6 +181,10 @@ class OrganizationSerializer(serializers.ModelSerializer):
                 organization=obj, is_public=True
             ).values("member__username")
         ]
+
+    def get_teams(self, obj):
+        teams = Team.objects.filter(team_organization=obj)
+        return TeamSerializer(teams, many=True).data
 
     def get_avatar_url(self, obj):
         return get_avatar_url(obj)
@@ -265,9 +283,7 @@ class StatusChoiceField(serializers.ChoiceField):
             if self._choices[i] == data:
                 return i
         raise serializers.ValidationError(
-            "Invalid status. Acceptable values are {}.".format(
-                list(self._choices.values())
-            )
+            "Invalid status. Acceptable values are {}.".format(self._choices.values())
         )
 
 
@@ -523,3 +539,45 @@ class LatestPackageSerializer(serializers.Serializer):
     package_id = serializers.UUIDField()
     packaged_at = serializers.DateTimeField()
     data_last_updated_at = serializers.DateTimeField()
+
+
+class TeamSerializer(serializers.ModelSerializer):
+    organization = serializers.StringRelatedField(source="team_organization")
+
+    class Meta:
+        model = Team
+        fields = ("username", "organization")
+
+
+class TeamMemberSerializer(serializers.ModelSerializer):
+    member = serializers.CharField()
+
+    def to_internal_value(self, data):
+        validated_data = super().to_internal_value(data)
+        email_or_username = data.get("member")
+
+        request_method = self.context["request"].method
+
+        if request_method in ["PUT", "PATCH"]:
+            if not email_or_username:
+                raise serializers.ValidationError(
+                    {"member": "Username must be provided"}
+                )
+
+            try:
+                if User.objects.fast_search(email_or_username) > 0:
+                    raise serializers.ValidationError(
+                        {
+                            "member": f"A user with username '{email_or_username}' already exists."
+                        }
+                    )
+            except User.DoesNotExist:
+                email_or_username = self.context["view"].kwargs.get("member_username")
+
+        validated_data["member"] = User.objects.fast_search(email_or_username)
+
+        return validated_data
+
+    class Meta:
+        model = TeamMember
+        fields = ("member",)

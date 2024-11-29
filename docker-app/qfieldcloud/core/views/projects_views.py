@@ -7,6 +7,7 @@ from drf_spectacular.utils import (
     extend_schema_view,
 )
 from qfieldcloud.core import pagination, permissions_utils
+from qfieldcloud.core.drf_utils import QfcOrderingFilter
 from qfieldcloud.core.models import Project, ProjectQueryset
 from qfieldcloud.core.serializers import ProjectSerializer
 from qfieldcloud.core.utils2 import storage
@@ -77,6 +78,8 @@ class ProjectViewSet(viewsets.ModelViewSet):
     lookup_url_kwarg = "projectid"
     permission_classes = [permissions.IsAuthenticated, ProjectViewSetPermissions]
     pagination_class = pagination.QfcLimitOffsetPagination()
+    filter_backends = [QfcOrderingFilter]
+    ordering_fields = ["owner__username::alias=owner", "name", "created_at"]
 
     def get_queryset(self):
         projects = Project.objects.for_user(self.request.user)
@@ -97,7 +100,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
         return projects
 
     @transaction.atomic
-    def perform_update(self, serializer):
+    def perform_update(self, serializer: ProjectSerializer) -> None:
         # Here we do an additional check if the owner has changed. If so, the reciever
         # of the project must have enough storage quota, otherwise the transfer is
         # not permitted.
@@ -111,7 +114,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
         # If owner has not changed, no additional check is made
         if old_owner == new_owner:
-            return
+            return None
 
         # Owner has changed, we must ensure he has enough quota for that
         # (in this transaction, the project is his already, so we just need to
@@ -133,6 +136,8 @@ class PublicProjectsListView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = ProjectSerializer
     pagination_class = pagination.QfcLimitOffsetPagination()
+    filter_backends = [QfcOrderingFilter]
+    ordering_fields = ["owner__username::alias=owner", "name", "created_at"]
 
     def get_queryset(self):
         return Project.objects.for_user(self.request.user).filter(is_public=True)
